@@ -5,6 +5,10 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     FromSample, Sample, SizedSample, I24,
 };
+use lexpr::{
+    Value
+};
+use anyhow::{anyhow, Result};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "sin generator", long_about = None)]
@@ -13,28 +17,31 @@ struct Opt {
     #[arg(long, default_value_t = String::from("default"))]
     device: String,
 
-    #[arg(short, long, default_value_t = String::from(""))]
-    channels: String,
+    // #[arg(long, default_value_t = String::from(""))]
+    // ch: String,
 
-    #[arg(short, long, default_value_t = 440.0)]
-    freq: f32,
+    // #[arg(short, long, default_value_t = 440.0)]
+    // freq: f32,
 
-    #[arg(short, long, default_value_t = 0.0)]
-    dur: f32,
+    // #[arg(short, long, default_value_t = 0.0)]
+    // dur: f32,
 
-    #[arg(short, long, default_value_t = 1.0)]
-    ampl: f32,
+    // #[arg(short, long, default_value_t = 1.0)]
+    // ampl: f32,
+
+    #[arg(long, default_value_t = String::from(""))]
+    sinout: String,
 }
 
 #[derive(Clone)]
-struct Params {
+struct CmdSinout {
     freq: f32,
     ampl: f32,
     channels: Vec<f32>,
     dur: f32, // 0 = indefinite
 }
 
-impl Params {
+impl CmdSinout {
     fn new() -> Self {
         Self {
             freq: 440.0,
@@ -43,6 +50,15 @@ impl Params {
             dur: 0.0,
         }
     }
+}
+
+struct CmdFFTMon {
+    channels: Vec<u8>,
+    length: u32,
+}
+
+enum Command {
+    Sinout(CmdSinout)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,23 +78,19 @@ fn main() -> anyhow::Result<()> {
     let config = device.default_output_config().unwrap();
     println!("Default output config: {config:?}");
 
-    let mut params = Params::new();
-    params.freq = opt.freq;
-    params.dur = opt.dur;
-    params.ampl = opt.ampl;
+    let sinout_cmd = lexpr::from_str(&opt.sinout)?;
+
+    let mut params = parse_sinout(&sinout_cmd)?;
+    // params.freq = opt.freq;
+    // params.dur = opt.dur;
+    // params.ampl = opt.ampl;
 
     // set up channels vector
     // it is a list of gains, corresponding to each channel.
     // user passes a list of channel numbers, so set each of these to 1 and leave the rest at 0.
     // if user passes no channel numbers, send the signal to all the channels
-    if opt.channels.is_empty() {
+    if params.channels.is_empty() {
         params.channels.resize(config.channels() as usize, 1.0);
-    } else {
-        params.channels.resize(config.channels() as usize, 0.0);
-        let channels: Vec<i32> = opt.channels.split(",").map(|s| s.parse().unwrap()).collect();
-        for ch in channels {
-            params.channels[ch as usize] = 1.0;
-        }
     }
 
     match config.sample_format() {
@@ -100,7 +112,73 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-pub fn run<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: Params) -> Result<(), anyhow::Error>
+fn parse_sinout(args: &Value) -> Result<CmdSinout> {
+    let mut cmd = CmdSinout::new();
+    let mut channels: Vec<u8> = Vec::new();
+    for_plist(args, |key, val| {
+        match key {
+            "freq" => cmd.freq = val.as_f64().unwrap() as f32,
+            "ampl" => cmd.ampl = val.as_f64().unwrap() as f32,
+            "dur" => cmd.dur = val.as_f64().unwrap() as f32,
+            "ch" => {
+                for v in val.list_iter().unwrap() {
+                    match v {
+                        Value::Number(v) => channels.push(v.as_u64().unwrap() as u8),
+                        _ => ()
+                    }
+                }
+            },
+            _ => ()
+        }
+    });
+    if channels.len() > 0 {
+        channels.sort();
+        let lastch = channels[channels.len() - 1];
+        cmd.channels.resize((lastch + 1) as usize, 0.0);
+        for ch in channels {
+            cmd.channels[ch as usize] = 1.0;
+        }
+    }
+    Ok(cmd)
+}
+
+fn for_plist<F>(plist: &Value, mut func: F)
+    where F: FnMut(&str, &Value)
+{
+    let mut i = plist.list_iter().unwrap();
+    loop {
+        match i.next() {
+            Some(key) => {
+                match *key {
+                    Value::Symbol(_) => {
+                        match i.next() {
+                            Some(val) => {
+                                println!("key {key} val {val}");
+                                func(key.as_symbol().unwrap(), val)
+                            },
+                            None => break
+                        }
+                    },
+                    _ => break
+                }
+            },
+            None => break
+        }
+    }
+}
+
+fn parse_cmd(cmd: &Value, args: &Value) -> Result<Command> {
+    match cmd {
+        Value::Symbol(s) => match cmd.as_str().unwrap() {
+            "sinout" => Ok(Command::Sinout(parse_sinout(args).unwrap())),
+            //"fftmon" => Ok(parse_fftmon(args)),
+            _ => Err(anyhow!("unknown command {}", *s))
+        },
+        _ => Err(anyhow!("bad token {}", cmd))
+    }
+}
+
+pub fn run<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: CmdSinout) -> Result<(), anyhow::Error>
 where
     T: SizedSample + FromSample<f32>
 {
@@ -138,7 +216,7 @@ where
     Ok(())
 }
 
-fn write_data<T>(output: &mut [T], channels: usize, params: &Params, next_sample: &mut dyn FnMut() -> f32)
+fn write_data<T>(output: &mut [T], channels: usize, params: &CmdSinout, next_sample: &mut dyn FnMut() -> f32)
 where
     T: Sample + FromSample<f32>,
 {
@@ -148,10 +226,8 @@ where
         let mut gaini = params.channels.iter();
         for sample in frame.iter_mut() {
             match gaini.next() {
-                None => break,
-                Some(g) => {
-                    *sample = (value * g).to_sample();
-                }
+                None => *sample = (0.0).to_sample(),
+                Some(g) => *sample = (value * g).to_sample()
             }
         }
     }
