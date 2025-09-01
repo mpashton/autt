@@ -9,6 +9,11 @@ use lexpr::{
     Value
 };
 use anyhow::{anyhow, Result};
+use ringbuf::{
+    traits::{Consumer, Producer, Split},
+    HeapRb,
+};
+use std::thread;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "sin generator", long_about = None)]
@@ -31,6 +36,9 @@ struct Opt {
 
     #[arg(long, default_value_t = String::from(""))]
     sinout: String,
+
+    #[arg(long, default_value_t = String::from(""))]
+    input: String,
 }
 
 #[derive(Clone)]
@@ -52,13 +60,27 @@ impl CmdSinout {
     }
 }
 
+#[derive(Clone)]
+struct CmdInput {
+    channels: Vec<u8>,
+}
+
+impl CmdInput {
+    fn new() -> Self {
+        Self {
+            channels: Vec::new()
+        }
+    }
+}
+
 struct CmdFFTMon {
     channels: Vec<u8>,
     length: u32,
 }
 
 enum Command {
-    Sinout(CmdSinout)
+    Sinout(CmdSinout),
+    Input(CmdInput)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -78,38 +100,90 @@ fn main() -> anyhow::Result<()> {
     let config = device.default_output_config().unwrap();
     println!("Default output config: {config:?}");
 
-    let sinout_cmd = lexpr::from_str(&opt.sinout)?;
+    if opt.sinout.len() > 0 {
 
-    let mut params = parse_sinout(&sinout_cmd)?;
-    // params.freq = opt.freq;
-    // params.dur = opt.dur;
-    // params.ampl = opt.ampl;
+        let sinout_cmd = lexpr::from_str(&opt.sinout)?;
 
-    // set up channels vector
-    // it is a list of gains, corresponding to each channel.
-    // user passes a list of channel numbers, so set each of these to 1 and leave the rest at 0.
-    // if user passes no channel numbers, send the signal to all the channels
-    if params.channels.is_empty() {
-        params.channels.resize(config.channels() as usize, 1.0);
+        let mut params = parse_sinout(&sinout_cmd)?;
+
+        // if user passes no channel numbers, send the signal to all the channels
+        if params.channels.is_empty() {
+            params.channels.resize(config.channels() as usize, 1.0);
+        }
+
+        match config.sample_format() {
+            //cpal::SampleFormat::I8 => run::<i8>(&device, &config.into()),
+            //cpal::SampleFormat::I16 => run::<i16>(&device, &config.into()),
+            //cpal::SampleFormat::I24 => run::<I24>(&device, &config.into()),
+            //cpal::SampleFormat::I32 => run::<i32>(&device, &config.into()),
+            // cpal::SampleFormat::I48 => run::<I48>(&device, &config.into()),
+            //cpal::SampleFormat::I64 => run::<i64>(&device, &config.into()),
+            //cpal::SampleFormat::U8 => run::<u8>(&device, &config.into()),
+            //cpal::SampleFormat::U16 => run::<u16>(&device, &config.into()),
+            // cpal::SampleFormat::U24 => run::<U24>(&device, &config.into()),
+            //cpal::SampleFormat::U32 => run::<u32>(&device, &config.into()),
+            // cpal::SampleFormat::U48 => run::<U48>(&device, &config.into()),
+            //cpal::SampleFormat::U64 => run::<u64>(&device, &config.into()),
+            cpal::SampleFormat::F32 => run::<f32>(&device, &config.clone().into(), params),
+            //cpal::SampleFormat::F64 => run::<f64>(&device, &config.into()),
+            sample_format => panic!("Unsupported sample format '{sample_format}'"),
+        }?;
     }
 
-    match config.sample_format() {
-        //cpal::SampleFormat::I8 => run::<i8>(&device, &config.into()),
-        //cpal::SampleFormat::I16 => run::<i16>(&device, &config.into()),
-        //cpal::SampleFormat::I24 => run::<I24>(&device, &config.into()),
-        //cpal::SampleFormat::I32 => run::<i32>(&device, &config.into()),
-        // cpal::SampleFormat::I48 => run::<I48>(&device, &config.into()),
-        //cpal::SampleFormat::I64 => run::<i64>(&device, &config.into()),
-        //cpal::SampleFormat::U8 => run::<u8>(&device, &config.into()),
-        //cpal::SampleFormat::U16 => run::<u16>(&device, &config.into()),
-        // cpal::SampleFormat::U24 => run::<U24>(&device, &config.into()),
-        //cpal::SampleFormat::U32 => run::<u32>(&device, &config.into()),
-        // cpal::SampleFormat::U48 => run::<U48>(&device, &config.into()),
-        //cpal::SampleFormat::U64 => run::<u64>(&device, &config.into()),
-        cpal::SampleFormat::F32 => run::<f32>(&device, &config.into(), params),
-        //cpal::SampleFormat::F64 => run::<f64>(&device, &config.into()),
-        sample_format => panic!("Unsupported sample format '{sample_format}'"),
+    if opt.input.len() > 0 {
+        let input_args = lexpr::from_str(&opt.input)?;
+        let mut input_cmd = parse_input(&input_args)?;
+
+        let config: cpal::StreamConfig = config.into();
+        let channel_ct = config.channels as usize;
+        let ring = HeapRb::<f32>::new(48000 * channel_ct);
+        let (mut producer, mut consumer) = ring.split();
+
+        let mut input_cmd_p = input_cmd.clone();
+
+        let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let mut overrun = false;
+            for frame in data.chunks_exact(channel_ct) {
+                for ch in &input_cmd_p.channels {
+                //for &sample in data {
+                    if producer.try_push(frame[*ch as usize]).is_err() {
+                        overrun = true;
+                    }
+                }
+                // if output_fell_behind {
+                //     eprintln!("output stream fell behind: try increasing latency");
+                // }
+            }
+        };
+
+        let input_stream = device.build_input_stream(&config, input_data_fn, err_fn, None)?;
+
+        // if opt.mon.len() > 0 {
+        //     let args = lexpr::from_str(&opt.mon)?;
+        //     let mut mon_cmd = parse_mon(&args)?;
+        // }
     }
+
+    Ok(())
+}
+
+fn parse_input(args: &Value) -> Result<CmdInput> {
+    let mut cmd = CmdInput::new();
+    for_plist(args, |key, val| {
+        match key {
+            "ch" => {
+                for v in val.list_iter().unwrap() {
+                    match v {
+                        Value::Number(v) => cmd.channels.push(v.as_u64().unwrap() as u8),
+                        _ => ()
+                    }
+                }
+            },
+            _ => ()
+        }
+    });
+
+    Ok(cmd)
 }
 
 fn parse_sinout(args: &Value) -> Result<CmdSinout> {
@@ -131,6 +205,9 @@ fn parse_sinout(args: &Value) -> Result<CmdSinout> {
             _ => ()
         }
     });
+    // set up channels vector
+    // it is a list of gains, corresponding to each channel.
+    // user passes a list of channel numbers, so set each of these to 1 and leave the rest at 0.
     if channels.len() > 0 {
         channels.sort();
         let lastch = channels[channels.len() - 1];
@@ -152,10 +229,7 @@ fn for_plist<F>(plist: &Value, mut func: F)
                 match *key {
                     Value::Symbol(_) => {
                         match i.next() {
-                            Some(val) => {
-                                println!("key {key} val {val}");
-                                func(key.as_symbol().unwrap(), val)
-                            },
+                            Some(val) => func(key.as_symbol().unwrap(), val),
                             None => break
                         }
                     },
@@ -231,4 +305,8 @@ where
             }
         }
     }
+}
+
+fn err_fn(err: cpal::StreamError) {
+    eprintln!("an error occurred on stream: {err}");
 }
