@@ -10,10 +10,11 @@ use lexpr::{
 };
 use anyhow::{anyhow, Result};
 use ringbuf::{
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Producer, Split, Observer},
     HeapRb,
 };
 use std::thread;
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "sin generator", long_about = None)]
@@ -39,6 +40,9 @@ struct Opt {
 
     #[arg(long, default_value_t = String::from(""))]
     input: String,
+
+    #[arg(long)]
+    mon: bool,
 }
 
 #[derive(Clone)]
@@ -88,18 +92,28 @@ fn main() -> anyhow::Result<()> {
 
     let host = cpal::default_host();
 
-    let device = if opt.device == "default" {
+    let output_device = if opt.device == "default" {
         host.default_output_device()
     } else {
         host.output_devices()?
             .find(|x| x.name().map(|y| y == opt.device).unwrap_or(false))
     }
     .expect("failed to find output device");
-    println!("Output device: {}", device.name()?);
+    println!("Output device: {}", output_device.name()?);
 
-    let config = device.default_output_config().unwrap();
+    let input_device = if opt.device == "default" {
+        host.default_input_device()
+    } else {
+        host.input_devices()?
+            .find(|x| x.name().map(|y| y == opt.device).unwrap_or(false))
+    }
+    .expect("failed to find input device");
+    println!("Input device: {}", input_device.name()?);
+
+    let config = output_device.default_output_config().unwrap();
     println!("Default output config: {config:?}");
 
+    // --- sinout
     if opt.sinout.len() > 0 {
 
         let sinout_cmd = lexpr::from_str(&opt.sinout)?;
@@ -124,12 +138,13 @@ fn main() -> anyhow::Result<()> {
             //cpal::SampleFormat::U32 => run::<u32>(&device, &config.into()),
             // cpal::SampleFormat::U48 => run::<U48>(&device, &config.into()),
             //cpal::SampleFormat::U64 => run::<u64>(&device, &config.into()),
-            cpal::SampleFormat::F32 => run::<f32>(&device, &config.clone().into(), params),
+            cpal::SampleFormat::F32 => run_sinout::<f32>(&output_device, &config.clone().into(), params),
             //cpal::SampleFormat::F64 => run::<f64>(&device, &config.into()),
             sample_format => panic!("Unsupported sample format '{sample_format}'"),
         }?;
     }
 
+    // --- input module
     if opt.input.len() > 0 {
         let input_args = lexpr::from_str(&opt.input)?;
         let mut input_cmd = parse_input(&input_args)?;
@@ -139,29 +154,52 @@ fn main() -> anyhow::Result<()> {
         let ring = HeapRb::<f32>::new(48000 * channel_ct);
         let (mut producer, mut consumer) = ring.split();
 
-        let mut input_cmd_p = input_cmd.clone();
+        let input_cmd_p = input_cmd.clone();
 
         let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
             let mut overrun = false;
+            //println!("input buffer {} samples", data.len());
             for frame in data.chunks_exact(channel_ct) {
                 for ch in &input_cmd_p.channels {
-                //for &sample in data {
                     if producer.try_push(frame[*ch as usize]).is_err() {
                         overrun = true;
                     }
                 }
-                // if output_fell_behind {
-                //     eprintln!("output stream fell behind: try increasing latency");
-                // }
+                if overrun {
+                    eprintln!("output stream fell behind: try increasing latency");
+                }
             }
         };
 
-        let input_stream = device.build_input_stream(&config, input_data_fn, err_fn, None)?;
+        let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
 
-        // if opt.mon.len() > 0 {
-        //     let args = lexpr::from_str(&opt.mon)?;
-        //     let mut mon_cmd = parse_mon(&args)?;
-        // }
+        if opt.mon {
+            let pb = ProgressBar::new(100);
+            pb.set_style(ProgressStyle::with_template("{bar} {msg}").unwrap());
+
+            loop {
+                let mut buf: Vec<f32> = Vec::new();
+                let buf_sz = 1024;
+                loop {
+                    if buf.len() >= buf_sz {
+                        break;
+                    }
+                    if consumer.occupied_len() >= (channel_ct) {
+                        let mut frame = [0.0; 64];
+                        consumer.pop_slice(&mut frame);
+                        buf.push(frame[0]);
+                    }
+                }
+                let mut rms: f32 = 0.0;
+                for s in buf {
+                    rms += (s * s);
+                }
+                let rms = (rms / (buf_sz as f32)).sqrt();
+                pb.set_message(format!("{rms}"));
+                pb.set_position((rms * 100.0) as u64);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     Ok(())
@@ -252,7 +290,7 @@ fn parse_cmd(cmd: &Value, args: &Value) -> Result<Command> {
     }
 }
 
-pub fn run<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: CmdSinout) -> Result<(), anyhow::Error>
+pub fn run_sinout<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: CmdSinout) -> Result<(), anyhow::Error>
 where
     T: SizedSample + FromSample<f32>
 {
@@ -272,7 +310,7 @@ where
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            write_data(data, channels, &params2, &mut next_value)
+            sinout_cb(data, channels, &params2, &mut next_value)
         },
         err_fn,
         None,
@@ -290,7 +328,7 @@ where
     Ok(())
 }
 
-fn write_data<T>(output: &mut [T], channels: usize, params: &CmdSinout, next_sample: &mut dyn FnMut() -> f32)
+fn sinout_cb<T>(output: &mut [T], channels: usize, params: &CmdSinout, next_sample: &mut dyn FnMut() -> f32)
 where
     T: Sample + FromSample<f32>,
 {
