@@ -15,6 +15,8 @@ use ringbuf::{
 };
 use std::thread;
 use indicatif::{ProgressBar, ProgressStyle};
+use autkit::scope::*;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "sin generator", long_about = None)]
@@ -43,6 +45,9 @@ struct Opt {
 
     #[arg(long)]
     mon: bool,
+
+    #[arg(long)]
+    scope: bool,
 }
 
 #[derive(Clone)]
@@ -118,7 +123,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- sinout
     if opt.sinout.len() > 0 {
-        println!("sinout");
+        //println!("sinout");
 
         let sinout_cmd = lexpr::from_str(&opt.sinout)?;
 
@@ -215,6 +220,11 @@ fn main() -> anyhow::Result<()> {
                 }
             });
         }
+    }
+
+    let scopectl = Arc::new(ScopeCtl::new());
+    if opt.scope {
+        run_scope(scopectl.clone());
     }
 
     if opt.dur == 0.0 {
