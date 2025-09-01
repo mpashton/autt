@@ -220,12 +220,45 @@ fn main() -> anyhow::Result<()> {
                 }
             });
         }
+
+        else if opt.scope {
+            let scopectl = Arc::new(ScopeCtl::new());
+            let scopectl_p = scopectl.clone();
+            thread::spawn(move || {
+                loop {
+                    let mut buf: Vec<f32> = Vec::new();
+                    let buf_sz = 4096;
+                    loop {
+                        if buf.len() >= buf_sz {
+                            break;
+                        }
+                        if consumer.occupied_len() >= input_ch_ct {
+                            let mut frame = [0.0; 64];
+                            consumer.pop_slice(&mut frame);
+                            buf.push(frame[0]);
+                        }
+                    }
+                    let mut rms: f32 = 0.0;
+                    let mut peak: f32 = 0.0;
+                    for s in buf {
+                        rms += (s * s);
+                        let sm = s.abs();
+                        if sm > peak { peak = sm; }
+                    }
+                    let rms = (rms / (buf_sz as f32)).sqrt();
+                    {
+                        let mut data = scopectl_p.data[scopectl_p.cur()].lock().unwrap();
+                        data.peak = peak;
+                        data.rms = rms;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+            run_scope(scopectl.clone()); // does not return
+        }
+
     }
 
-    let scopectl = Arc::new(ScopeCtl::new());
-    if opt.scope {
-        run_scope(scopectl.clone());
-    }
 
     if opt.dur == 0.0 {
         loop {
