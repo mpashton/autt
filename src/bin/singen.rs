@@ -3,7 +3,7 @@
 use clap::Parser;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    FromSample, Sample, SizedSample, I24,
+    FromSample, Sample, SizedSample, I24, Stream
 };
 use lexpr::{
     Value
@@ -29,8 +29,8 @@ struct Opt {
     // #[arg(short, long, default_value_t = 440.0)]
     // freq: f32,
 
-    // #[arg(short, long, default_value_t = 0.0)]
-    // dur: f32,
+    #[arg(short, long, default_value_t = 0.0)]
+    dur: f32,
 
     // #[arg(short, long, default_value_t = 1.0)]
     // ampl: f32,
@@ -113,8 +113,12 @@ fn main() -> anyhow::Result<()> {
     let config = output_device.default_output_config().unwrap();
     println!("Default output config: {config:?}");
 
+    let mut output_stream: Option<cpal::Stream>;
+    let mut input_stream: Option<cpal::Stream>;
+
     // --- sinout
     if opt.sinout.len() > 0 {
+        println!("sinout");
 
         let sinout_cmd = lexpr::from_str(&opt.sinout)?;
 
@@ -125,7 +129,7 @@ fn main() -> anyhow::Result<()> {
             params.channels.resize(config.channels() as usize, 1.0);
         }
 
-        match config.sample_format() {
+        output_stream = match config.sample_format() {
             //cpal::SampleFormat::I8 => run::<i8>(&device, &config.into()),
             //cpal::SampleFormat::I16 => run::<i16>(&device, &config.into()),
             //cpal::SampleFormat::I24 => run::<I24>(&device, &config.into()),
@@ -138,14 +142,15 @@ fn main() -> anyhow::Result<()> {
             //cpal::SampleFormat::U32 => run::<u32>(&device, &config.into()),
             // cpal::SampleFormat::U48 => run::<U48>(&device, &config.into()),
             //cpal::SampleFormat::U64 => run::<u64>(&device, &config.into()),
-            cpal::SampleFormat::F32 => run_sinout::<f32>(&output_device, &config.clone().into(), params),
+            cpal::SampleFormat::F32 => Some(run_sinout::<f32>(&output_device, &config.clone().into(), params).unwrap()),
             //cpal::SampleFormat::F64 => run::<f64>(&device, &config.into()),
             sample_format => panic!("Unsupported sample format '{sample_format}'"),
-        }?;
+        };
     }
 
     // --- input module
     if opt.input.len() > 0 {
+        //println!("input");
         let input_args = lexpr::from_str(&opt.input)?;
         let mut input_cmd = parse_input(&input_args)?;
 
@@ -171,35 +176,53 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
+        //println!("building input stream");
+        input_stream = Some(input_device.build_input_stream(&config, input_data_fn, err_fn, None).unwrap());
+        //println!("built input stream");
+
+        let input_ch_ct = input_cmd.channels.len();
 
         if opt.mon {
+            //println!("mon");
             let pb = ProgressBar::new(100);
             pb.set_style(ProgressStyle::with_template("{bar} {msg}").unwrap());
 
-            loop {
-                let mut buf: Vec<f32> = Vec::new();
-                let buf_sz = 1024;
+            thread::spawn(move || {
                 loop {
-                    if buf.len() >= buf_sz {
-                        break;
+                    let mut buf: Vec<f32> = Vec::new();
+                    let buf_sz = 4096;
+                    loop {
+                        if buf.len() >= buf_sz {
+                            break;
+                        }
+                        if consumer.occupied_len() >= input_ch_ct {
+                            let mut frame = [0.0; 64];
+                            consumer.pop_slice(&mut frame);
+                            buf.push(frame[0]);
+                        }
                     }
-                    if consumer.occupied_len() >= (channel_ct) {
-                        let mut frame = [0.0; 64];
-                        consumer.pop_slice(&mut frame);
-                        buf.push(frame[0]);
+                    let mut rms: f32 = 0.0;
+                    let mut peak: f32 = 0.0;
+                    for s in buf {
+                        rms += (s * s);
+                        let sm = s.abs();
+                        if sm > peak { peak = sm; }
                     }
+                    let rms = (rms / (buf_sz as f32)).sqrt();
+                    pb.set_message(format!("{rms} {peak}"));
+                    pb.set_position((rms * 100.0) as u64);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                let mut rms: f32 = 0.0;
-                for s in buf {
-                    rms += (s * s);
-                }
-                let rms = (rms / (buf_sz as f32)).sqrt();
-                pb.set_message(format!("{rms}"));
-                pb.set_position((rms * 100.0) as u64);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            });
         }
+    }
+
+    if opt.dur == 0.0 {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    } else {
+        std::thread::sleep(std::time::Duration::from_millis((1000.0 * opt.dur) as u64));
     }
 
     Ok(())
@@ -290,7 +313,7 @@ fn parse_cmd(cmd: &Value, args: &Value) -> Result<Command> {
     }
 }
 
-pub fn run_sinout<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: CmdSinout) -> Result<(), anyhow::Error>
+pub fn run_sinout<T>(device: &cpal::Device, config: &cpal::StreamConfig, params: CmdSinout) -> Result<cpal::Stream, anyhow::Error>
 where
     T: SizedSample + FromSample<f32>
 {
@@ -307,6 +330,7 @@ where
     let err_fn = |err| eprintln!("an error occurred on stream: {err}");
 
     let params2 = params.clone();
+
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
@@ -315,23 +339,17 @@ where
         err_fn,
         None,
     )?;
+
     stream.play()?;
 
-    if params.dur == 0.0 {
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    } else {
-        std::thread::sleep(std::time::Duration::from_millis((1000.0 * params.dur) as u64));
-    }
-
-    Ok(())
+    Ok(stream)
 }
 
 fn sinout_cb<T>(output: &mut [T], channels: usize, params: &CmdSinout, next_sample: &mut dyn FnMut() -> f32)
 where
     T: Sample + FromSample<f32>,
 {
+    //println!("sinout cb {}", output.len());
     for frame in output.chunks_mut(channels) {
         //let value: T = T::from_sample(next_sample());
         let value = next_sample();
