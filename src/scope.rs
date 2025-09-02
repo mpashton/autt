@@ -70,34 +70,42 @@ impl eframe::App for ScopeBuilder {
             let rms = data.rms;
             let peak = data.peak;
             ui.vertical(|ui| {
-                ui.add(Label::new(RichText::new(format!("rms {rms}")).monospace()));
-
                 if let Some(last_sample) = data.samples.last() {
-                    let root = EguiBackend::new(ui).into_drawing_area();
-                    root.fill(&WHITE).unwrap();
-                    let mut chart = ChartBuilder::on(&root)
-                        .margin(5)
-                        .margin_top(20)
-                        .x_label_area_size(30)
-                        .y_label_area_size(30)
-                        .build_cartesian_2d(0f32..last_sample.0, -1f32..1f32)
-                        .unwrap();
+                    let frame = egui::Frame::new()
+                        .corner_radius(20.0);
+                    frame.show(ui, |ui| {
+                        ui.set_width(400.0);
+                        ui.set_height(300.0);
 
-                    chart.configure_mesh().draw().unwrap();
+                        let root = EguiBackend::new(ui).into_drawing_area();
+                        root.fill(&BLACK).unwrap();
+                        let mut chart = ChartBuilder::on(&root)
+                            .margin(5)
+                            .x_label_area_size(30)
+                            .y_label_area_size(30)
+                            .build_cartesian_2d(0f32..last_sample.0, -1f32..1f32)
+                            .unwrap();
 
-                    chart
-                        .draw_series(LineSeries::new(data.samples.clone(), &BLUE))
-                        .unwrap();
+                        chart.configure_mesh()
+                            .axis_style(WHITE)
+                            .label_style(("sans-serif", 10).into_font().color(&WHITE))
+                            .draw().unwrap();
 
-                    chart
-                        .configure_series_labels()
-                        .background_style(WHITE.mix(0.8))
-                        .border_style(BLACK)
-                        .draw()
-                        .unwrap();
+                        chart
+                            .draw_series(LineSeries::new(data.samples.clone(), &GREEN))
+                            .unwrap();
 
-                    root.present().unwrap();
+                        // chart
+                        //     .configure_series_labels()
+                        //     .background_style(WHITE.mix(0.8))
+                        //     .border_style(BLACK)
+                        //     .draw()
+                        //     .unwrap();
+
+                        root.present().unwrap();
+                    });
                 }
+                ui.add(Label::new(RichText::new(format!("rms {rms} peak {peak}")).monospace()));
             });
 
         });
