@@ -247,7 +247,7 @@ fn main() -> anyhow::Result<()> {
                     let mut buf: Vec<f32> = Vec::new();
                     let buf_sz = 4096;
                     loop {
-                        if buf.len() >= buf_sz {
+                        if buf.len() >= (buf_sz * channel_ct) {
                             break;
                         }
                         if consumer.occupied_len() >= input_ch_ct {
