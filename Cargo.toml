@@ -1,5 +1,6 @@
 [package]
-name = "autkit"
+name = "autt"
+description = "Audio Test Tools"
 version = "0.1.0"
 edition = "2024"
 
@@ -15,4 +16,4 @@ egui-plotter = "0.6.0"
 plotters = "0.3.7"
 
 [[bin]]
-name = "singen"
+name = "autt"

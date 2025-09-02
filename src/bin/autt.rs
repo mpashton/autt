@@ -15,7 +15,7 @@ use ringbuf::{
 };
 use std::thread;
 use indicatif::{ProgressBar, ProgressStyle};
-use autkit::scope::*;
+use autt::scope::*;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
