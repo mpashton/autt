@@ -11,6 +11,8 @@ lexpr = "0.2.7"
 ringbuf = "0.4.8"
 indicatif = "0.18.0"
 eframe = "0.32.1"
+egui-plotter = "0.6.0"
+plotters = "0.3.7"
 
 [[bin]]
 name = "singen"

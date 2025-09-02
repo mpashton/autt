@@ -161,6 +161,7 @@ fn main() -> anyhow::Result<()> {
 
         let config: cpal::StreamConfig = config.into();
         let channel_ct = config.channels as usize;
+        let sample_rate = config.sample_rate.0 as f32;
         let ring = HeapRb::<f32>::new(48000 * channel_ct);
         let (mut producer, mut consumer) = ring.split();
 
@@ -233,21 +234,32 @@ fn main() -> anyhow::Result<()> {
                             break;
                         }
                         if consumer.occupied_len() >= input_ch_ct {
-                            let mut frame = [0.0; 64];
+                            let mut frame = vec![0.0; input_ch_ct];
                             consumer.pop_slice(&mut frame);
                             buf.push(frame[0]);
                         }
                     }
                     let mut rms: f32 = 0.0;
                     let mut peak: f32 = 0.0;
+                    let mut i: u32 = 0;
+                    let mut display_samples: Vec<(f32, f32)> = Vec::new();
                     for s in buf {
                         rms += (s * s);
                         let sm = s.abs();
                         if sm > peak { peak = sm; }
+                        if i < 512 {
+                            let point: (f32, f32) = (((i as f32) / sample_rate), s);
+                            display_samples.push(point);
+                            // if i < 24 {
+                            //     println!("sample {} {} {}", i, point.0, point.1);
+                            // }
+                        }
+                        i = i + 1;
                     }
                     let rms = (rms / (buf_sz as f32)).sqrt();
                     {
                         let mut data = scopectl_p.data[scopectl_p.cur()].lock().unwrap();
+                        data.samples = display_samples;
                         data.peak = peak;
                         data.rms = rms;
                     }
