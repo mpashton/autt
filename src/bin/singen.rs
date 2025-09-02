@@ -258,6 +258,9 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+
+                    let trigger_index = find_trigger(&buf, 0, channel_ct);
+
                     // let mut rms: f32 = 0.0;
                     // let mut peak: f32 = 0.0;
                     // let mut i: u32 = 0;
@@ -278,7 +281,8 @@ fn main() -> anyhow::Result<()> {
                     // let rms = (rms / (buf_sz as f32)).sqrt();
 
                     for ch in &scope_cmd.channels {
-                        scopectl_p.data.lock().unwrap()[*ch as usize] = calc_scope_channel(&buf, *ch as usize, channel_ct, buf_sz, sample_rate);
+                        scopectl_p.data.lock().unwrap()[*ch as usize] 
+                            = calc_scope_channel(&buf, *ch as usize, channel_ct, buf_sz, sample_rate, trigger_index);
                         // data.samples = display_samples;
                         // data.peak = peak;
                         // data.rms = rms;
@@ -301,16 +305,32 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn calc_scope_channel(buf: &[f32], ch: usize, ch_ct: usize, buf_sz: usize, sample_rate: f32) -> ScopeChannel {
+fn find_trigger(buf: &[f32], trigger_ch: usize, ch_ct: usize) -> usize {
+    let mut prev_sample = buf[trigger_ch];
+    let mut i: usize = 0;
+    for frame in buf.chunks_exact(ch_ct) {
+        let s = frame[trigger_ch];
+        if (prev_sample <= 0.0) && (s > 0.0) {
+            return i;
+        }
+        i += 1;
+        prev_sample = s;
+    }
+    0
+}
+
+fn calc_scope_channel(buf: &[f32], ch: usize, ch_ct: usize, buf_sz: usize, sample_rate: f32, trigger_idx: usize) -> ScopeChannel {
     let mut d = ScopeChannel::new("");
     let mut i = 0;
+    let display_length = 512;
+    let last_sample_idx = trigger_idx + display_length;
     for frame in buf.chunks_exact(ch_ct) {
         let s = frame[ch];
         d.rms += (s * s);
         let sm = s.abs();
         if sm > d.peak { d.peak = sm; }
-        if i < 512 {
-            let point: (f32, f32) = (((i as f32) / sample_rate), s);
+        if i >= trigger_idx && i < last_sample_idx {
+            let point: (f32, f32) = ((((i - trigger_idx) as f32) / sample_rate), s);
             d.samples.push(point);
             // if i < 24 {
             //     println!("sample {} {} {}", i, point.0, point.1);
