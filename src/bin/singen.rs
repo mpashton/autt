@@ -46,8 +46,8 @@ struct Opt {
     #[arg(long)]
     mon: bool,
 
-    #[arg(long)]
-    scope: bool,
+    #[arg(long, default_value_t = String::from(""))]
+    scope: String,
 }
 
 #[derive(Clone)]
@@ -82,9 +82,17 @@ impl CmdInput {
     }
 }
 
-struct CmdFFTMon {
+#[derive(Clone)]
+struct CmdScope {
     channels: Vec<u8>,
-    length: u32,
+}
+
+impl CmdScope {
+    fn new() -> Self {
+        Self {
+            channels: Vec::new()
+        }
+    }
 }
 
 enum Command {
@@ -118,8 +126,8 @@ fn main() -> anyhow::Result<()> {
     let config = output_device.default_output_config().unwrap();
     println!("Default output config: {config:?}");
 
-    let mut output_stream: Option<cpal::Stream>;
-    let mut input_stream: Option<cpal::Stream>;
+    let output_stream: Option<cpal::Stream>;
+    let input_stream: Option<cpal::Stream>;
 
     // --- sinout
     if opt.sinout.len() > 0 {
@@ -157,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     if opt.input.len() > 0 {
         //println!("input");
         let input_args = lexpr::from_str(&opt.input)?;
-        let mut input_cmd = parse_input(&input_args)?;
+        let input_cmd = parse_input(&input_args)?;
 
         let config: cpal::StreamConfig = config.into();
         let channel_ct = config.channels as usize;
@@ -222,8 +230,17 @@ fn main() -> anyhow::Result<()> {
             });
         }
 
-        else if opt.scope {
-            let scopectl = Arc::new(ScopeCtl::new());
+        else if opt.scope.len() > 0 {
+            let args = lexpr::from_str(&opt.scope)?;
+            let scope_cmd = parse_scope(&args)?;
+            let channel_ct = scope_cmd.channels.len();
+            let scopectl = Arc::new(Scope::new());
+            {
+                let mut scope = scopectl.data.lock().unwrap();
+                for ch in &scope_cmd.channels {
+                    scope.push(ScopeChannel::new(&*format!("ch{}", *ch)));
+                }
+            }
             let scopectl_p = scopectl.clone();
             thread::spawn(move || {
                 loop {
@@ -236,41 +253,42 @@ fn main() -> anyhow::Result<()> {
                         if consumer.occupied_len() >= input_ch_ct {
                             let mut frame = vec![0.0; input_ch_ct];
                             consumer.pop_slice(&mut frame);
-                            buf.push(frame[0]);
+                            for ch in &scope_cmd.channels {
+                                buf.push(frame[*ch as usize]);
+                            }
                         }
                     }
-                    let mut rms: f32 = 0.0;
-                    let mut peak: f32 = 0.0;
-                    let mut i: u32 = 0;
-                    let mut display_samples: Vec<(f32, f32)> = Vec::new();
-                    for s in buf {
-                        rms += (s * s);
-                        let sm = s.abs();
-                        if sm > peak { peak = sm; }
-                        if i < 512 {
-                            let point: (f32, f32) = (((i as f32) / sample_rate), s);
-                            display_samples.push(point);
-                            // if i < 24 {
-                            //     println!("sample {} {} {}", i, point.0, point.1);
-                            // }
-                        }
-                        i = i + 1;
-                    }
-                    let rms = (rms / (buf_sz as f32)).sqrt();
-                    {
-                        let mut data = scopectl_p.data[scopectl_p.cur()].lock().unwrap();
-                        data.samples = display_samples;
-                        data.peak = peak;
-                        data.rms = rms;
+                    // let mut rms: f32 = 0.0;
+                    // let mut peak: f32 = 0.0;
+                    // let mut i: u32 = 0;
+                    // let mut display_samples: Vec<(f32, f32)> = Vec::new();
+                    // for s in buf {
+                    //     rms += (s * s);
+                    //     let sm = s.abs();
+                    //     if sm > peak { peak = sm; }
+                    //     if i < 512 {
+                    //         let point: (f32, f32) = (((i as f32) / sample_rate), s);
+                    //         display_samples.push(point);
+                    //         // if i < 24 {
+                    //         //     println!("sample {} {} {}", i, point.0, point.1);
+                    //         // }
+                    //     }
+                    //     i = i + 1;
+                    // }
+                    // let rms = (rms / (buf_sz as f32)).sqrt();
+
+                    for ch in &scope_cmd.channels {
+                        scopectl_p.data.lock().unwrap()[*ch as usize] = calc_scope_channel(&buf, *ch as usize, channel_ct, buf_sz, sample_rate);
+                        // data.samples = display_samples;
+                        // data.peak = peak;
+                        // data.rms = rms;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             });
             run_scope(scopectl.clone()); // does not return
         }
-
     }
-
 
     if opt.dur == 0.0 {
         loop {
@@ -283,8 +301,48 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn calc_scope_channel(buf: &[f32], ch: usize, ch_ct: usize, buf_sz: usize, sample_rate: f32) -> ScopeChannel {
+    let mut d = ScopeChannel::new("");
+    let mut i = 0;
+    for frame in buf.chunks_exact(ch_ct) {
+        let s = frame[ch];
+        d.rms += (s * s);
+        let sm = s.abs();
+        if sm > d.peak { d.peak = sm; }
+        if i < 512 {
+            let point: (f32, f32) = (((i as f32) / sample_rate), s);
+            d.samples.push(point);
+            // if i < 24 {
+            //     println!("sample {} {} {}", i, point.0, point.1);
+            // }
+        }
+        i = i + 1;
+    }
+    d.rms = (d.rms / (buf_sz as f32)).sqrt();
+    d
+}
+
 fn parse_input(args: &Value) -> Result<CmdInput> {
     let mut cmd = CmdInput::new();
+    for_plist(args, |key, val| {
+        match key {
+            "ch" => {
+                for v in val.list_iter().unwrap() {
+                    match v {
+                        Value::Number(v) => cmd.channels.push(v.as_u64().unwrap() as u8),
+                        _ => ()
+                    }
+                }
+            },
+            _ => ()
+        }
+    });
+
+    Ok(cmd)
+}
+
+fn parse_scope(args: &Value) -> Result<CmdScope> {
+    let mut cmd = CmdScope::new();
     for_plist(args, |key, val| {
         match key {
             "ch" => {
