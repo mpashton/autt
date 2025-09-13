@@ -18,10 +18,10 @@ jobs:
       release_built: ${{ steps.set-output.outputs.release_built }}
     steps:
       - uses: actions/checkout@v5
-      - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
-        run: cargo build --profile ${{ matrix.BUILD_TARGET }} --target=${{ matrix.target }}
       - name: install Rust version
         run: rustup target add x86_64-apple-darwin
+      - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo build --profile ${{ matrix.BUILD_TARGET }} --target=${{ matrix.target }}
       #- name: Run tests in "${{ matrix.BUILD_TARGET }}" mode
       #  run: cargo test --profile ${{ matrix.BUILD_TARGET }}
       - name: Upload release artifact
