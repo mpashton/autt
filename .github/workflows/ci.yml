@@ -10,10 +10,10 @@ jobs:
         include:
           - os: macos-15
             target: x86_64-apple-darwin
-            BUILD_TARGET: [release]
+            BUILD_TARGET: release
           - os: macos-15-aarch64
             target: aarch64-apple-darwin
-            BUILD_TARGET: [release]
+            BUILD_TARGET: release
     outputs:
       release_built: ${{ steps.set-output.outputs.release_built }}
     steps:
