@@ -28,7 +28,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: autt-${{ matrix.target }}
-          path: target/${{ matrix.BUILD_TARGET }}/autt
+          path: target/${{ matrix.target }}/${{ matrix.BUILD_TARGET }}/autt
       - name: Cache
         uses: actions/cache@v4
         with:
