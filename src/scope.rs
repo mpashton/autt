@@ -104,7 +104,7 @@ impl eframe::App for ScopeBuilder {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let channel_ct = self.ctl.data.lock().unwrap().len();
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for i in 0..channel_ct {
                     let data = self.ctl.data.lock().unwrap();
                     draw_scope_channel(ui, &data[i]);
