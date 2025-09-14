@@ -18,7 +18,15 @@ jobs:
       release_built: ${{ steps.set-output.outputs.release_built }}
     steps:
       - uses: actions/checkout@v5
-      - name: install Rust version
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: add x86 target
         run: rustup target add x86_64-apple-darwin
       - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
         run: cargo build --profile ${{ matrix.BUILD_TARGET }} --target=${{ matrix.target }}
@@ -29,11 +37,3 @@ jobs:
         with:
           name: autt-${{ matrix.target }}
           path: target/${{ matrix.target }}/${{ matrix.BUILD_TARGET }}/autt
-      - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
